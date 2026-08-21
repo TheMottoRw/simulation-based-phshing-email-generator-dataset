@@ -24,7 +24,7 @@ from src.data.imbalance_handler import (
     handle_imbalance_undersampling,
     handle_imbalance_smote,
     handle_imbalance_adasyn,
-    handle_imbalance_smote_tomek,
+    handle_imbalance_smote_tomek, handle_imbalance_safe,
 )
 from src.models.detector import PhishingDetector, AVAILABLE_MODELS
 from src.utils.visualization import (
@@ -136,9 +136,9 @@ def run_model_comparison(train_df, test_df, imbalance_method="smote"):
     print("=" * 70)
 
     feature_methods = {
-        "smote": handle_imbalance_smote,
-        "adasyn": handle_imbalance_adasyn,
-        "smote_tomek": handle_imbalance_smote_tomek,
+        "smote": lambda X, y: handle_imbalance_safe(X, y, method='smote'),
+        "adasyn": lambda X, y: handle_imbalance_safe(X, y, method='adasyn'),
+        "smote_tomek": lambda X, y: handle_imbalance_safe(X, y, method='smote_tomek'),
     }
 
     all_results = []
