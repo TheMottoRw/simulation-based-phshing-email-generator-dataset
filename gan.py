@@ -26,6 +26,7 @@ from sklearn.metrics import (
     average_precision_score,
     classification_report
 )
+
 warnings.filterwarnings('ignore')
 
 # -----------------------------------
@@ -41,7 +42,8 @@ CONFIG = {
     'batch_size': 8,
     'n_generated': 500,
     'seed': 42,
-    "phishing_to_legitimate_ratio": (1, 5)
+    "phishing_to_legitimate_ratio": (1, 5),
+    "target_dataset_size": 10000,
 
 }
 
@@ -377,64 +379,179 @@ if len(legitimate_data) > 0:
     phishing_ratio, legitimate_ratio = CONFIG[
         "phishing_to_legitimate_ratio"
     ]
+    # ============================================================
+    # TARGET DATASET SIZE CONFIGURATION
+    # ============================================================
 
-    # Number of phishing samples
-    n_phishing = len(generated_df)
+    target_dataset_size = CONFIG["target_dataset_size"]
 
-    # Calculate required legitimate samples
-    n_legitimate_required = int(
-        n_phishing * legitimate_ratio / phishing_ratio
+    print("\n" + "=" * 60)
+    print("TARGET DATASET CONFIGURATION")
+    print("=" * 60)
+
+    print(f"Target dataset size: {target_dataset_size}")
+    print(f"Existing legitimate emails: {len(legitimate_data)}")
+
+    # ============================================================
+    # CALCULATE REQUIRED GENERATED PHISHING SAMPLES
+    # ============================================================
+
+    # Keep all existing legitimate emails
+    n_legitimate = len(legitimate_data)
+
+    # Calculate the number of rows still needed
+    num_generated_samples = target_dataset_size - n_legitimate
+
+    # Validate target size
+    if num_generated_samples <= 0:
+        raise ValueError(
+            f"Target dataset size ({target_dataset_size}) must be "
+            f"greater than the number of existing legitimate emails "
+            f"({n_legitimate})."
+        )
+
+    print(f"Synthetic phishing emails required: {num_generated_samples}")
+
+    # ============================================================
+    # GENERATE SYNTHETIC PHISHING EMAIL VECTORS
+    # ============================================================
+
+    print("\nGenerating synthetic phishing emails...")
+
+    noise = np.random.normal(
+        0,
+        1,
+        (num_generated_samples, latent_dim)
     )
 
-    # Check whether enough legitimate samples exist
-    n_legitimate = min(
-        n_legitimate_required,
-        len(legitimate_data)
+    generated_vectors = generator.predict(
+        noise,
+        batch_size=32,
+        verbose=1
     )
-    legitimate_sample = legitimate_data.sample(n=n_legitimate, random_state=CONFIG['seed'])
+
+    # ============================================================
+    # CONVERT GENERATED VECTORS TO TEXT
+    # ============================================================
+
+    feature_names = vectorizer.get_feature_names_out()
+
+    synthetic_emails = []
+
+    for vector in generated_vectors:
+        # Select the most important words
+        top_indices = vector.argsort()[-10:]
+
+        # Sort words by their generated score
+        top_indices = top_indices[
+            np.argsort(vector[top_indices])[::-1]
+        ]
+
+        words = [
+            feature_names[i]
+            for i in top_indices
+        ]
+
+        # Create synthetic email text
+        synthetic_email = " ".join(words)
+
+        synthetic_emails.append(synthetic_email)
+
+    # ============================================================
+    # CREATE SYNTHETIC PHISHING DATAFRAME
+    # ============================================================
+
+    generated_df = pd.DataFrame({
+        "body": synthetic_emails,
+        "label": 1
+    })
+
+    print(f"\nGenerated phishing emails: {len(generated_df)}")
+
+    # ============================================================
+    # CREATE LEGITIMATE DATAFRAME FROM EXISTING DATASET
+    # ============================================================
+
+    # Keep all existing legitimate emails
     legitimate_df = pd.DataFrame({
-        "body": legitimate_sample.values,
+        "body": legitimate_data.astype(str).values,
         "label": 0
     })
-else:
-    # If no legitimate emails, create dummy ones
-    print("⚠️  No legitimate emails found. Creating dummy legitimate emails...")
-    legit_templates = [
-        "Thank you for your purchase. Your order has been confirmed.",
-        "Your meeting has been scheduled for tomorrow at 2 PM.",
-        "Please review the attached document and provide your feedback.",
-        "Welcome to our newsletter. You will receive monthly updates.",
-        "Your subscription payment has been processed successfully."
-    ]
-    legitimate_df = pd.DataFrame({
-        "body": [np.random.choice(legit_templates) for _ in range(num_generated_samples)],
-        "label": 0
-    })
 
-# Combine datasets
-final_dataset = pd.concat([
-    legitimate_df,
-    generated_df
-], ignore_index=True)
+    print(f"Existing legitimate emails used: {len(legitimate_df)}")
 
-# Shuffle
-final_dataset = final_dataset.sample(frac=1, random_state=CONFIG['seed']).reset_index(drop=True)
+    # ============================================================
+    # COMBINE EXISTING AND GENERATED DATA
+    # ============================================================
 
-print(f"✓ Final dataset: {len(final_dataset)} emails")
-print(f"  Legitimate: {len(final_dataset[final_dataset['label'] == 0])}")
-print(f"  Phishing: {len(final_dataset[final_dataset['label'] == 1])}")
-print(f"  Ratio: {final_dataset['label'].mean():.2%} phishing")
+    final_dataset = pd.concat(
+        [
+            legitimate_df,
+            generated_df
+        ],
+        ignore_index=True
+    )
 
-# -----------------------------------
-# EXPORT CSV
-# -----------------------------------
+    # ============================================================
+    # SHUFFLE FINAL DATASET
+    # ============================================================
 
-print(f"\nExporting dataset to {CONFIG['output_path']}...")
+    final_dataset = final_dataset.sample(
+        frac=1,
+        random_state=CONFIG["seed"]
+    ).reset_index(drop=True)
 
-# Create directory if it doesn't exist
-os.makedirs(os.path.dirname(CONFIG['output_path']), exist_ok=True)
+    # ============================================================
+    # VERIFY TARGET DATASET SIZE
+    # ============================================================
 
-final_dataset.to_csv(CONFIG['output_path'], index=False)
+    if len(final_dataset) != target_dataset_size:
+        raise ValueError(
+            f"Dataset size error: expected {target_dataset_size}, "
+            f"but got {len(final_dataset)}"
+        )
+
+    # ============================================================
+    # DISPLAY FINAL DATASET INFORMATION
+    # ============================================================
+
+    print("\n" + "=" * 60)
+    print("FINAL GENERATED DATASET")
+    print("=" * 60)
+
+    print(f"Total rows: {len(final_dataset)}")
+
+    print("\nClass distribution:")
+    print(
+        final_dataset["label"].value_counts()
+    )
+
+    print("\nClass distribution percentage:")
+    print(
+        final_dataset["label"]
+        .value_counts(normalize=True)
+        .mul(100)
+        .round(2)
+    )
+
+    print("\nFirst five shuffled rows:")
+    print(final_dataset.head())
+
+    # ============================================================
+    # EXPORT FINAL DATASET
+    # ============================================================
+
+    final_dataset.to_csv(
+        CONFIG["output_path"],
+        index=False
+    )
+
+    print("\n" + "=" * 60)
+    print("DATASET EXPORTED SUCCESSFULLY")
+    print("=" * 60)
+
+    print(f"Output file: {CONFIG['output_path']}")
+    print(f"Total rows exported: {len(final_dataset)}")
 # -----------------------------------
 # MACHINE LEARNING MODEL PERFORMANCE EVALUATION
 # ============================================================
@@ -462,7 +579,6 @@ from sklearn.metrics import (
 
 os.makedirs("src/results", exist_ok=True)
 
-
 # ============================================================
 # STEP 1: PREPARE ORIGINAL DATASET
 # ============================================================
@@ -486,7 +602,7 @@ dataset["label"] = dataset["label"].astype(int)
 # Remove empty email bodies
 dataset = dataset[
     dataset["body"].str.strip() != ""
-].copy()
+    ].copy()
 
 print("\n" + "=" * 70)
 print("ORIGINAL DATASET")
@@ -495,7 +611,6 @@ print("=" * 70)
 print(f"Total emails: {len(dataset)}")
 print(f"Phishing emails: {(dataset['label'] == 1).sum()}")
 print(f"Legitimate emails: {(dataset['label'] == 0).sum()}")
-
 
 # ============================================================
 # STEP 2: SPLIT ORIGINAL DATA BEFORE EVALUATION
@@ -540,7 +655,6 @@ print(train_original_df["label"].value_counts())
 print("\nTesting class distribution:")
 print(test_original_df["label"].value_counts())
 
-
 # ============================================================
 # STEP 3: PREPARE SYNTHETIC PHISHING DATA
 # ============================================================
@@ -558,14 +672,13 @@ generated_df["label"] = 1
 # Remove empty synthetic emails
 generated_df = generated_df[
     generated_df["body"].str.strip() != ""
-].copy()
+    ].copy()
 
 print("\n" + "=" * 70)
 print("SYNTHETIC PHISHING DATA")
 print("=" * 70)
 
 print(f"Generated phishing emails: {len(generated_df)}")
-
 
 # ============================================================
 # STEP 4: GET LEGITIMATE EMAILS FROM TRAINING DATA ONLY
@@ -577,10 +690,9 @@ print(f"Generated phishing emails: {len(generated_df)}")
 
 legitimate_train_df = train_original_df[
     train_original_df["label"] == 0
-].copy()
+    ].copy()
 
 print(f"\nAvailable legitimate training emails: {len(legitimate_train_df)}")
-
 
 # ============================================================
 # STEP 5: SET CLASS IMBALANCE RATIO
@@ -625,7 +737,6 @@ print(f"Synthetic phishing used: {n_phishing}")
 print(f"Legitimate required: {n_legitimate_required}")
 print(f"Legitimate available and used: {n_legitimate}")
 
-
 # ============================================================
 # STEP 6: SELECT LEGITIMATE TRAINING EMAILS
 # ============================================================
@@ -634,7 +745,6 @@ selected_legitimate_df = legitimate_train_df.sample(
     n=n_legitimate,
     random_state=CONFIG["seed"]
 )
-
 
 # ============================================================
 # STEP 7: CREATE FINAL TRAINING DATASET
@@ -672,7 +782,6 @@ print(
     .round(2)
 )
 
-
 # ============================================================
 # STEP 8: PREPARE TRAINING AND TESTING DATA
 # ============================================================
@@ -688,7 +797,6 @@ y_train = training_dataset["label"].astype(int)
 
 X_test = test_original_df["body"].astype(str)
 y_test = test_original_df["label"].astype(int)
-
 
 # ============================================================
 # STEP 9: CREATE TF-IDF + LOGISTIC REGRESSION MODEL
@@ -714,7 +822,6 @@ evaluation_model = Pipeline([
     )
 ])
 
-
 # ============================================================
 # STEP 10: TRAIN MODEL
 # ============================================================
@@ -730,7 +837,6 @@ evaluation_model.fit(
 
 print("Model training completed successfully.")
 
-
 # ============================================================
 # STEP 11: MAKE PREDICTIONS ON UNTOUCHED TEST DATA
 # ============================================================
@@ -739,7 +845,6 @@ y_pred = evaluation_model.predict(X_test)
 
 # Probability of phishing class = 1
 y_scores = evaluation_model.predict_proba(X_test)[:, 1]
-
 
 # ============================================================
 # STEP 12: CALCULATE PERFORMANCE METRICS
@@ -772,7 +877,6 @@ auprc = average_precision_score(
     y_scores
 )
 
-
 # ============================================================
 # STEP 13: DISPLAY PERFORMANCE RESULTS
 # ============================================================
@@ -785,7 +889,6 @@ print(f"Precision : {precision:.4f}")
 print(f"Recall    : {recall:.4f}")
 print(f"F1-Score  : {f1:.4f}")
 print(f"AUPRC     : {auprc:.4f}")
-
 
 # ============================================================
 # STEP 14: DISPLAY CLASSIFICATION REPORT
@@ -807,7 +910,6 @@ print(
         zero_division=0
     )
 )
-
 
 # ============================================================
 # STEP 15: CONFUSION MATRIX
@@ -831,7 +933,6 @@ print(
 print(
     f"Actual Phishing      {cm[1][0]:<10} {cm[1][1]}"
 )
-
 
 # ============================================================
 # STEP 16: SAVE MODEL PERFORMANCE RESULTS
@@ -925,8 +1026,8 @@ performance_results = pd.DataFrame([{
     "Total_Samples": len(final_dataset),
     "Training_Samples": len(X_train),
     "Testing_Samples": len(X_test),
-    "Phishing_Samples": int(sum(y == 1)),
-    "Legitimate_Samples": int(sum(y == 0)),
+    "Phishing_Samples": int(sum(final_dataset['label'] == 1)),
+    "Legitimate_Samples": int(sum(final_dataset['label'] == 0)),
     "Precision": precision,
     "Recall": recall,
     "F1_Score": f1,
